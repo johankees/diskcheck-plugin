@@ -2,7 +2,6 @@ package org.jenkinsci.plugin;
 
 import hudson.AbortException;
 import hudson.Extension;
-import hudson.FilePath;
 import hudson.Launcher;
 import hudson.model.BuildListener;
 import hudson.model.AbstractBuild;
@@ -19,9 +18,9 @@ import hudson.util.RemotingDiagnostics;
 
 import org.kohsuke.stapler.DataBoundConstructor;
 
-import java.io.File;
 import java.io.IOException;
 import java.io.PrintStream;
+import java.nio.file.Paths;
 
 import hudson.node_monitors.DiskSpaceMonitorDescriptor;
 
@@ -95,8 +94,8 @@ public class Diskcheck extends BuildWrapper {
 		SpaceThreshold = PluginImpl.getInstance().getSpacecheck();
 
 
-		log.println("Disk space threshold is set to :" + SpaceThreshold + "Gb");
-		log.println("Checking disk space Now ");
+		log.println("Checking disk space");
+		log.println("Disk space threshold is set to: " + SpaceThreshold + " Gb");
 
 		/* touch workspace so that it is created on first time */
 		if (!build.getWorkspace().exists()) {
@@ -110,48 +109,64 @@ public class Diskcheck extends BuildWrapper {
 		String NodeName = build.getBuiltOnStr();
 
 		int roundedSize=0;
-		try 
-		{
+		try {
 			if ( Comp != null) {
 
 				String baseName = build.getWorkspace().getBaseName();
-				String buildWorkSpace = build.getWorkspace().toString();
-				String buildScript = String.format("new File(\"%s\").getFreeSpace()",buildWorkSpace);
 
-				String diskSpace = RemotingDiagnostics.executeGroovy(buildScript, Comp.getChannel());
-				try { 
+				// Update the path so we can run the script on Windows as well.
+				String buildWorkSpace = build.getWorkspace().toString().replaceAll("\\\\", "\\\\\\\\");
+				String buildScript = String.format("new File(\"%s\").getFreeSpace()", buildWorkSpace);
+				String diskSpace = null;
+
+				// First try to get the diskspace using groovy call getFreeSpace()
+				// If found we get the size in kb, so we need to convert this to Gb
+				try {
+					// Get diskspace
+					diskSpace = RemotingDiagnostics.executeGroovy(buildScript, Comp.getChannel());
 					diskSpace = diskSpace.split(":")[diskSpace.split(" ").length-1].replaceAll("\\s+","");
-				}
-				catch (Exception e){
-					diskSpace = null;
-				}
-				// If we can not get the disk space from remote diagnostic we shall use the diskcheck as a backup
-				log.println("diskspace is "+ diskSpace);
-				if ( diskSpace == null) {
-					if ( DiskSpaceMonitor.DESCRIPTOR.get(Comp)== null )
-					{   log.println("No Slave Data available trying to get data from slave");
-					Thread.sleep(1000);
-					if ( DiskSpaceMonitor.DESCRIPTOR.get(Comp)== null )
 
-						log.println(" Could not get Slave Information , Exiting Disk check for this slave");
-					return;
+					// Convert to Gb
+					Double ds = Double.parseDouble(diskSpace) / (1024 * 1024 * 1024);
+					diskSpace = Double.toString(ds);
+					//log.println ( "Diskspace is: "+ diskSpace + " Gb");
+				} catch (Exception e) {
+					log.println("Free Diskspace could not be determed due to unexpected exception: " + e);
+					diskSpace = null;
+				}				
+
+				// If we can not get the disk space from remote diagnostic we shall use the diskcheck as a backup
+				// Diskcheck returns the size in Gb.
+				if ( diskSpace == null ) {
+					if ( DiskSpaceMonitor.DESCRIPTOR.get(Comp) == null ) {
+						//log.println("No Slave Data available trying to get data from slave. Trying once more...");
+						Thread.sleep(1000);
+						if ( DiskSpaceMonitor.DESCRIPTOR.get(Comp) == null ) {
+							log.println("Could not get Slave Information");
+							return;
+						}
 					}
 					AbstractDiskSpaceMonitor.getAll();
 					long size = DiskSpaceMonitor.DESCRIPTOR.get(Comp).size;
 					DiskSpaceMonitorDescriptor.DiskSpace diskSpaceMonitor = new DiskSpaceMonitorDescriptor.DiskSpace(baseName, size);
-					diskSpace= diskSpaceMonitor.getGbLeft();
+					diskSpace = diskSpaceMonitor.getGbLeft();
+					//log.println ( "Diskspace is: "+ diskSpace + " Gb");
 				}
-				log.println ( "Total Disk space in workspace is "+ diskSpace);
 
-				roundedSize = (int) (Long.parseLong(diskSpace) / (1024 * 1024 * 1024));
-				//roundedSize = (int) (size / (1024 * 1024 * 1024));
+				roundedSize = (int) Math.round(Double.valueOf(diskSpace));
+				//log.println ( "Total Disk space in workspace is: "+ roundedSize + " Gb");
 			}
 		}
 		catch(NullPointerException e ){
-			log.println("Could not get Slave disk size Information , Exiting Disk check for this slave");
+			log.println("Could not get Slave disk size Information due to NullPointerException, Exiting Disk check for this slave");
 			return;
 		}
-		log.println("Total Disk Space Available is: " + roundedSize + "Gb");
+		catch(Exception e) {
+			log.println("Unknown Exception. Exiting Disk check for this slave");
+			return;
+		}
+		
+		log.println("Total Disk Space Available is: " + roundedSize + " Gb");
 
 		if (build.getBuiltOnStr() == "") {
 			NodeName = "master";
